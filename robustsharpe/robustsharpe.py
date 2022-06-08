@@ -10,7 +10,7 @@ NDArrayFloat = npt.NDArray[np.float_]
 NDArrayInt = npt.NDArray[np.float_]
 
 
-def hac_inference(ret: npt.NDArray[np.float_], alpha: float = 0.05, rf: float = 0.0):
+def relative_hac_inference(ret: npt.NDArray[np.float_], alpha: float = 0.05, rf: float = 0.0):
     """
     Computes relative Sharpe ratio statistics using asymptotic heteroscedasticity auto-correlation robust estimator
     as per
@@ -33,18 +33,19 @@ def hac_inference(ret: npt.NDArray[np.float_], alpha: float = 0.05, rf: float = 
         (np.ndarray, float, tuple, float, float) : Sharpe ratios, sharpe ratio difference, confidence intervals
                 p-value, standard error
     """
+
     # returns = np.vstack([ret1.values.flatten(), ret2.values.flatten()]).T
     sigma_hat = np.std(ret, axis=0)
     mu_hat = np.mean(ret, axis=0)
     SR_hat = mu_hat / sigma_hat
-    standard_error = compute_se_parzen(ret)
+    standard_error = compute_se_parzen_relative(ret)
     ci = norm.ppf(1 - alpha / 2) * standard_error
     SR_diff = np.diff(SR_hat)[0]
     p_val = 2 * norm.cdf(-np.abs(SR_diff) / standard_error)
     return SR_hat, SR_diff, (SR_diff - ci, SR_diff + ci), p_val, standard_error
 
 
-def compute_se_parzen(ret: npt.NDArray[np.float_], rf: float = 0.0):
+def compute_se_parzen_relative(ret: npt.NDArray[np.float_], rf: float = 0.0):
     """
     Computes the standard error of the Sharpe ratio estimator.
 
@@ -124,7 +125,7 @@ def compute_gamma_hat(v_hat: npt.NDArray[np.float_], j: int):
     if j >= T:
         raise ValueError("j must be smaller than the number of observations T!")
     for i in range(j, T):
-        gamma_hat = gamma_hat + np.outer(v_hat[i, ].T, v_hat[i - j, :])
+        gamma_hat = gamma_hat + np.outer(v_hat[i,].T, v_hat[i - j, :])
     gamma_hat = gamma_hat / T
     return gamma_hat
 
@@ -266,7 +267,7 @@ def bootstrap_inference(returns: npt.NDArray[np.float_], block_size: int, alpha:
     mu_hat = np.mean(returns, axis=0)
     SR_hat = mu_hat / sigma_hat
     SR_diff = np.diff(SR_hat)[0]
-    hac_se = compute_se_parzen(returns)
+    hac_se = compute_se_parzen_relative(returns)
     d = np.abs(SR_diff - delta_null) / hac_se
     p_value = 1.0
     se = 0.0
@@ -287,7 +288,8 @@ def bootstrap_inference(returns: npt.NDArray[np.float_], block_size: int, alpha:
         gradient[2] = -0.5 * mu_hat_star[0] / np.power(sigma_sq_hat_star[0] - mu_hat_star[0] ** 2, 1.5)
         gradient[3] = -0.5 * mu_hat_star[1] / np.power(sigma_sq_hat_star[1] - mu_hat_star[1] ** 2, 1.5)
         y_star = np.array([ret_star[:, 0] - mu_hat_star[0], ret_star[:, 1] - mu_hat_star[1],
-                           ret_star_squared[:, 0] - sigma_sq_hat_star[0], ret_star_squared[:, 1] - sigma_sq_hat_star[1]]).T
+                           ret_star_squared[:, 0] - sigma_sq_hat_star[0],
+                           ret_star_squared[:, 1] - sigma_sq_hat_star[1]]).T
         psi_hat_star = np.zeros((4, 4), dtype='float64')
         for j in range(1, l):
             zeta_star = (block_size ** 0.5) * np.mean(y_star[((j - 1) * block_size):(j * block_size), :], axis=0)
@@ -311,28 +313,88 @@ def bootstrap_inference(returns: npt.NDArray[np.float_], block_size: int, alpha:
         return SR_hat, SR_diff, (SR_diff - ci, SR_diff + ci), p_value, se
 
 
+def single_hac_inference(returns: npt.NDArray[np.float_], rf: float = 0.0, alpha: float = 0.05):
+    """
+    Computes an absolute (for a single returns series) Sharpe ratio statistics using asymptotic heteroscedasticity auto-correlation robust estimator
+    as per
+    References:
+
+    Ledoit, Oliver, and Michael Wolf.
+    "Robust performance hypothesis testing with the Sharpe ratio.
+    " Journal of Empirical Finance 15.5 (2008): 850-859.
+
+    Lo, Andrew W.
+    "The statistics of Sharpe ratios."
+     Financial analysts journal 58.4 (2002): 36-52.
+
+    Args:
+        ret (np.ndarray): Return array of dim T x 2
+        rf(float): Risk free rate
+        alpha (float): Significance level
+
+    Returns:
+        (np.ndarray, float, tuple, float, float) : Sharpe ratios, sharpe ratio difference, confidence intervals
+                p-value, standard error
+    """
+    returns = returns - rf
+    sigma_hat = np.std(returns, axis=0)
+    mu_hat = np.mean(returns, axis=0)
+    SR_hat = mu_hat / sigma_hat
+    standard_error = compute_se_parzen_single(returns)
+    ci = norm.ppf(1 - alpha / 2) * standard_error
+    p_val = 2 * norm.cdf(-np.abs(SR_hat) / standard_error)
+    return SR_hat, (SR_hat - ci, SR_hat + ci), p_val, standard_error
+
+
+def compute_se_parzen_single(returns: npt.NDArray[np.float_], rf: float = 0.0):
+    mu_hat = np.mean(returns, axis=0)
+    rets_squared = np.square(returns)
+    sigma_hat = np.mean(rets_squared, axis=0)
+    gradient = np.zeros(2)
+    T = len(returns)
+    # note that we are working with uncentered moments therefore for the delta method the function describing
+    # sharpe ratio is given as
+    # g(a, b) = a / sqrt(b - a^2)
+    # gradient[0] = 1 / sigma_hat
+    gradient[0] = (mu_hat - 2 * sigma_hat ** 2) / (2 * np.power(mu_hat - sigma_hat ** 2, 1.5))
+    gradient[1] = (mu_hat * sigma_hat) / np.power(mu_hat - sigma_hat ** 2, 1.5)
+    v_hat = np.array([returns - mu_hat, rets_squared - sigma_hat]).T
+    Psi_hat = compute_psi_hat(v_hat)
+    standard_error = np.sqrt(gradient @ Psi_hat @ gradient.T / T)
+    return standard_error
+
+
+def simple_sharpe_single(rets: npt.NDArray[np.float_], alpha=0.05, rf=0.0):
+    """
+    This method assumes that returns are independent and identically distributed draws from a normal distribution.
+    Args:
+        rets: ret (np.ndarray): Return array of dim T x 1
+        rf(float): Risk free rate
+        alpha (float): Significance level
+
+    Returns:
+
+    """
+    T = rets.shape[0]
+    sr = (np.mean(rets) - rf) / np.std(rets)
+    se = np.sqrt((1 / T) * (1 + (sr * sr) / 2))
+    ci = norm.ppf(1 - alpha / 2) * se
+    p_val = 2 * norm.cdf(-np.abs(sr) / se)
+    return sr, (sr - ci, sr + ci),  p_val, se
+
+
 if __name__ == '__main__':
     import timeit
-    mu = np.array([0.02, 0.2])
+
+    mu = np.array([0.2, 0.2])
     cov_mat = np.array([[0.3, 0.0], [0.0, 0.3]])
     returns_synth = np.random.multivariate_normal(mu, cov_mat, size=10000)
     # print(hac_inference(returns_synth))
 
     ret_agg = np.load("../data/ret_agg.npy")
     ret_hedge = np.load("../data/ret_hedge.npy")
-    # print(compute_se_parzen(ret_hedge))
-    vhat = _vhat(ret_agg)
-    print(hac_inference(returns_synth))
 
-    # print(hac_inference(ret_agg))
-    # print(bootstrap_inference(ret_agg, block_size=4, alpha=0.05, M=100))
 
-    # print(hac_inference(ret_agg))
-    # print(bootstrap_inference(ret_agg, block_size=4, alpha=0.05, M=10000))
-
-    # print(block_size_calibrate(ret_agg))
-    # print(block_size_calibrate(ret_hedge))
-
-    # timings
-    # print(timeit.timeit("hac_inference(ret_agg)", globals=globals(), number=10000))
-
+    # print(relative_hac_inference(ret_agg))
+    print(simple_sharpe_single(returns_synth[:, 0]))
+    print(single_hac_inference(returns_synth[:, 0]))
